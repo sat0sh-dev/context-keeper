@@ -1,0 +1,15 @@
+[package]
+name = "context-keeper"
+version = "0.1.0"
+edition = "2021"
+description = "AI-Native Development Context Engine - Helps AI agents remember your build environment"
+license = "MIT"
+repository = "https://github.com/user/context-keeper"
+keywords = ["ai", "mcp", "development", "context", "aosp", "ros"]
+categories = ["development-tools", "command-line-utilities"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+glob = "0.3"
