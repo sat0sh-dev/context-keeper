@@ -19,10 +19,7 @@ while IFS= read -r line; do
             echo '{"jsonrpc":"2.0","result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"context-keeper","version":"0.1.0"}},"id":'$id'}'
             ;;
         "tools/list")
-            cat << 'TOOLS_EOF'
-{"jsonrpc":"2.0","result":{"tools":[{"name":"get_dev_context","description":"Get current development environment context including build targets, containers, and configuration. Call this when context is unclear or after context compression.","inputSchema":{"type":"object","properties":{}}}]},"id":ID_PLACEHOLDER}
-TOOLS_EOF
-            | sed "s/ID_PLACEHOLDER/$id/"
+            echo '{"jsonrpc":"2.0","result":{"tools":[{"name":"get_dev_context","description":"Get current development environment context including build targets, containers, and configuration. Call this when context is unclear or after context compression.","inputSchema":{"type":"object","properties":{}}}]},"id":'$id'}'
             ;;
         "tools/call")
             tool_name=$(echo "$line" | jq -r '.params.name // empty')
