@@ -18,9 +18,17 @@ ContextKeeper provides a persistent, structured summary of your development envi
 ## Features
 
 - **BuildScript Collector**: Parses your build scripts and extracts targets, environment variables
-- **Container Collector**: Detects running Podman/Docker containers
+- **Container Collector**: Detects running Podman/Docker containers (dynamic state)
+- **History Collector**: Tracks relevant commands (lunch, source, export) via Claude Code Hooks
 - **MCP Server**: Integrates with Claude Code and other MCP-compatible tools
 - **Auto-Refresh**: CLAUDE.md instructs AI to refresh context when needed
+
+### Why Dynamic Collection Matters
+
+Static documentation (CLAUDE.md) becomes stale. ContextKeeper collects **current state** at query time:
+- Which containers are actually running right now
+- What `lunch` target was used in the last session
+- Environment variables that were `source`d
 
 ## Quick Start
 
@@ -115,6 +123,37 @@ runtime = "podman"              # Container runtime (podman/docker)
 
 [hints]
 default = "Important instructions for AI"
+
+[history]
+enabled = true                  # Enable command history tracking
+patterns = [                    # Regex patterns to match relevant commands
+    "lunch\\s+\\S+",
+    "source.*envsetup",
+    "export\\s+\\w+="
+]
+max_entries = 20                # Max history entries to show
+```
+
+### Command History Setup
+
+ContextKeeper uses Claude Code Hooks to log commands. The install script configures this automatically, or manually add to `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/path/to/context-keeper/hooks/log-commands.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
 ```
 
 ### Config file format (e.g., `emu.conf`)
@@ -136,11 +175,12 @@ CAN_FLASH=false
 
 ## Roadmap
 
+- [x] Command history tracking (via Claude Code Hooks)
+- [ ] Environment variable collector (host-side)
+- [ ] Git branch/status collector
 - [ ] ROS/ROS2 workspace detection
 - [ ] Yocto/BitBake support
-- [ ] Environment variable collector
 - [ ] Guardrails (warn before dangerous commands)
-- [ ] Context history tracking
 
 ## License
 

@@ -1,8 +1,8 @@
 use serde::Deserialize;
-use std::collections::HashMap;
 use std::fs;
-use std::io;
+use std::io::{self, BufRead};
 use std::path::Path;
+use regex::Regex;
 
 // ============================================================================
 // Configuration
@@ -14,6 +14,7 @@ struct Config {
     scripts: Option<ScriptsConfig>,
     containers: Option<ContainersConfig>,
     hints: Option<HintsConfig>,
+    history: Option<HistoryConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -41,6 +42,14 @@ struct HintsConfig {
     default: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct HistoryConfig {
+    enabled: Option<bool>,
+    log_file: Option<String>,
+    patterns: Option<Vec<String>>,
+    max_entries: Option<usize>,
+}
+
 // ============================================================================
 // Collectors
 // ============================================================================
@@ -64,6 +73,13 @@ struct ContainerInfo {
     runtime: String,
 }
 
+#[derive(Debug, Clone)]
+struct HistoryEntry {
+    timestamp: String,
+    command: String,
+    cwd: String,
+}
+
 #[derive(Debug, Default)]
 struct Context {
     project_name: String,
@@ -73,6 +89,7 @@ struct Context {
     entry_point: Option<String>,
     available_commands: Vec<String>,
     hints: String,
+    command_history: Vec<HistoryEntry>,
 }
 
 // ============================================================================
@@ -230,6 +247,86 @@ fn collect_containers(config: &Config) -> Vec<ContainerInfo> {
 }
 
 // ============================================================================
+// History Collector
+// ============================================================================
+
+fn collect_command_history(config: &Config) -> Vec<HistoryEntry> {
+    let history_config = match &config.history {
+        Some(hc) if hc.enabled.unwrap_or(true) => hc,
+        _ => return Vec::new(),
+    };
+
+    let log_file = history_config
+        .log_file
+        .clone()
+        .unwrap_or_else(|| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            format!("{}/.contextkeeper/command-history.jsonl", home)
+        });
+
+    let max_entries = history_config.max_entries.unwrap_or(20);
+
+    // Default patterns for AOSP-like environments
+    let default_patterns = vec![
+        r"lunch\s+\S+".to_string(),
+        r"source\s+.*envsetup".to_string(),
+        r"export\s+\w+=".to_string(),
+        r"m\s+\S+".to_string(),  // AOSP make shortcut
+        r"mm\b".to_string(),      // AOSP make module
+        r"mma\b".to_string(),     // AOSP make module all
+    ];
+
+    let patterns = history_config
+        .patterns
+        .clone()
+        .unwrap_or(default_patterns);
+
+    // Compile regex patterns
+    let compiled_patterns: Vec<Regex> = patterns
+        .iter()
+        .filter_map(|p| Regex::new(p).ok())
+        .collect();
+
+    let mut entries = Vec::new();
+
+    // Read log file
+    let path = Path::new(&log_file);
+    if !path.exists() {
+        return entries;
+    }
+
+    if let Ok(file) = fs::File::open(path) {
+        let reader = io::BufReader::new(file);
+
+        for line in reader.lines().flatten() {
+            // Parse JSONL entry
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
+                let command = json["command"].as_str().unwrap_or("");
+
+                // Check if command matches any pattern
+                let matches_pattern = compiled_patterns.is_empty() ||
+                    compiled_patterns.iter().any(|re| re.is_match(command));
+
+                if matches_pattern && !command.is_empty() {
+                    entries.push(HistoryEntry {
+                        timestamp: json["timestamp"].as_str().unwrap_or("").to_string(),
+                        command: command.to_string(),
+                        cwd: json["cwd"].as_str().unwrap_or("").to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    // Return last N entries (most recent)
+    if entries.len() > max_entries {
+        entries.drain(0..entries.len() - max_entries);
+    }
+
+    entries
+}
+
+// ============================================================================
 // Context Aggregator
 // ============================================================================
 
@@ -260,6 +357,9 @@ fn collect_context(config: &Config) -> Context {
     if let Some(hints) = &config.hints {
         ctx.hints = hints.default.clone().unwrap_or_default();
     }
+
+    // Command history
+    ctx.command_history = collect_command_history(config);
 
     ctx
 }
@@ -346,6 +446,26 @@ fn format_context_markdown(ctx: &Context) -> String {
         out.push_str("```\n");
     }
 
+    // Command history (important for context recovery)
+    if !ctx.command_history.is_empty() {
+        out.push_str("## Recent Relevant Commands\n");
+        out.push_str("These commands were executed in previous sessions (useful after context compression):\n\n");
+        out.push_str("| Time | Command |\n");
+        out.push_str("|------|--------|\n");
+        for entry in &ctx.command_history {
+            // Truncate long commands
+            let cmd_display = if entry.command.len() > 80 {
+                format!("{}...", &entry.command[..77])
+            } else {
+                entry.command.clone()
+            };
+            // Escape pipe characters in command
+            let cmd_escaped = cmd_display.replace('|', "\\|");
+            out.push_str(&format!("| {} | `{}` |\n", entry.timestamp, cmd_escaped));
+        }
+        out.push('\n');
+    }
+
     out
 }
 
@@ -397,7 +517,7 @@ impl serde::Serialize for Context {
         S: serde::Serializer,
     {
         use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("Context", 7)?;
+        let mut state = serializer.serialize_struct("Context", 8)?;
         state.serialize_field("project_name", &self.project_name)?;
         state.serialize_field("project_type", &self.project_type)?;
         state.serialize_field("targets", &self.targets)?;
@@ -405,6 +525,7 @@ impl serde::Serialize for Context {
         state.serialize_field("entry_point", &self.entry_point)?;
         state.serialize_field("available_commands", &self.available_commands)?;
         state.serialize_field("hints", &self.hints)?;
+        state.serialize_field("command_history", &self.command_history)?;
         state.end()
     }
 }
@@ -438,6 +559,20 @@ impl serde::Serialize for ContainerInfo {
         state.serialize_field("name", &self.name)?;
         state.serialize_field("status", &self.status)?;
         state.serialize_field("runtime", &self.runtime)?;
+        state.end()
+    }
+}
+
+impl serde::Serialize for HistoryEntry {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("HistoryEntry", 3)?;
+        state.serialize_field("timestamp", &self.timestamp)?;
+        state.serialize_field("command", &self.command)?;
+        state.serialize_field("cwd", &self.cwd)?;
         state.end()
     }
 }
