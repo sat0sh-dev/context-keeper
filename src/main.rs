@@ -86,6 +86,22 @@ struct HistoryEntry {
 }
 
 #[derive(Debug, Default, Clone)]
+struct GitInfo {
+    branch: String,
+    is_dirty: bool,
+    modified_files: usize,
+    untracked_files: usize,
+    last_commit_short: String,
+}
+
+#[derive(Debug, Clone)]
+struct AdbDevice {
+    serial: String,
+    state: String,
+    device_type: String, // "adb" or "fastboot"
+}
+
+#[derive(Debug, Default, Clone)]
 struct Context {
     project_name: String,
     project_type: String,
@@ -94,6 +110,8 @@ struct Context {
     available_commands: Vec<String>,
     hints: String,
     command_history: Vec<HistoryEntry>,
+    git_info: Option<GitInfo>,
+    adb_devices: Vec<AdbDevice>,
 }
 
 // ============================================================================
@@ -301,6 +319,154 @@ fn collect_command_history(config: &Config) -> Vec<HistoryEntry> {
 }
 
 // ============================================================================
+// Git Collector
+// ============================================================================
+
+fn collect_git_info() -> Option<GitInfo> {
+    // Check if we're in a git repository
+    let is_git = std::process::Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if !is_git {
+        return None;
+    }
+
+    let mut info = GitInfo::default();
+
+    // Get current branch
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["branch", "--show-current"])
+        .output()
+    {
+        if output.status.success() {
+            info.branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        }
+    }
+
+    // If branch is empty, try to get detached HEAD info
+    if info.branch.is_empty() {
+        if let Ok(output) = std::process::Command::new("git")
+            .args(["describe", "--always", "--dirty"])
+            .output()
+        {
+            if output.status.success() {
+                info.branch = format!("(detached: {})", String::from_utf8_lossy(&output.stdout).trim());
+            }
+        }
+    }
+
+    // Get status (modified and untracked counts)
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .output()
+    {
+        if output.status.success() {
+            let status = String::from_utf8_lossy(&output.stdout);
+            for line in status.lines() {
+                if line.starts_with(" M") || line.starts_with("M ") || line.starts_with("MM") {
+                    info.modified_files += 1;
+                } else if line.starts_with("??") {
+                    info.untracked_files += 1;
+                } else if !line.trim().is_empty() {
+                    info.modified_files += 1; // Other changes (added, deleted, etc.)
+                }
+            }
+            info.is_dirty = info.modified_files > 0 || info.untracked_files > 0;
+        }
+    }
+
+    // Get last commit short hash and message
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["log", "-1", "--format=%h %s"])
+        .output()
+    {
+        if output.status.success() {
+            let commit_info = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if commit_info.len() > 60 {
+                info.last_commit_short = format!("{}...", &commit_info.chars().take(57).collect::<String>());
+            } else {
+                info.last_commit_short = commit_info;
+            }
+        }
+    }
+
+    Some(info)
+}
+
+// ============================================================================
+// ADB/Fastboot Collector
+// ============================================================================
+
+fn collect_adb_devices() -> Vec<AdbDevice> {
+    let mut devices = Vec::new();
+
+    // Collect ADB devices
+    if let Ok(output) = std::process::Command::new("adb")
+        .args(["devices", "-l"])
+        .output()
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines().skip(1) {
+                // Skip "List of devices attached"
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    let serial = parts[0].to_string();
+                    let state = parts[1].to_string();
+
+                    // Skip offline devices
+                    if state == "offline" {
+                        continue;
+                    }
+
+                    devices.push(AdbDevice {
+                        serial,
+                        state,
+                        device_type: "adb".to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    // Collect Fastboot devices
+    if let Ok(output) = std::process::Command::new("fastboot")
+        .args(["devices", "-l"])
+        .output()
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if !parts.is_empty() {
+                    let serial = parts[0].to_string();
+                    devices.push(AdbDevice {
+                        serial,
+                        state: "fastboot".to_string(),
+                        device_type: "fastboot".to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    devices
+}
+
+// ============================================================================
 // Context Aggregator
 // ============================================================================
 
@@ -326,6 +492,8 @@ fn collect_context(config: &Config) -> Context {
     }
 
     ctx.command_history = collect_command_history(config);
+    ctx.git_info = collect_git_info();
+    ctx.adb_devices = collect_adb_devices();
     ctx
 }
 
@@ -422,6 +590,40 @@ fn format_context_markdown(ctx: &Context) -> String {
             };
             let cmd_escaped = cmd_display.replace('|', "\\|");
             out.push_str(&format!("| {} | `{}` |\n", entry.timestamp, cmd_escaped));
+        }
+        out.push('\n');
+    }
+
+    // Git information
+    if let Some(git) = &ctx.git_info {
+        out.push_str("## Git Status\n");
+        out.push_str(&format!("- **Branch:** {}", git.branch));
+        if git.is_dirty {
+            out.push_str(" (dirty)");
+        }
+        out.push('\n');
+        if git.modified_files > 0 || git.untracked_files > 0 {
+            out.push_str(&format!(
+                "- **Changes:** {} modified, {} untracked\n",
+                git.modified_files, git.untracked_files
+            ));
+        }
+        if !git.last_commit_short.is_empty() {
+            out.push_str(&format!("- **Last commit:** {}\n", git.last_commit_short));
+        }
+        out.push('\n');
+    }
+
+    // ADB/Fastboot devices
+    if !ctx.adb_devices.is_empty() {
+        out.push_str("## Connected Devices\n");
+        out.push_str("| Serial | State | Type |\n");
+        out.push_str("|--------|-------|------|\n");
+        for device in &ctx.adb_devices {
+            out.push_str(&format!(
+                "| {} | {} | {} |\n",
+                device.serial, device.state, device.device_type
+            ));
         }
         out.push('\n');
     }
