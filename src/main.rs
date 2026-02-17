@@ -1,14 +1,15 @@
 use regex::Regex;
 use rmcp::{
-    handler::server::tool::ToolRouter,
+    handler::server::{tool::ToolRouter, wrapper::Parameters},
     model::*,
     tool, tool_handler, tool_router,
     transport::stdio,
     ErrorData as McpError, ServerHandler, ServiceExt,
 };
-use serde::Deserialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Write};
 use std::path::Path;
 
 // ============================================================================
@@ -113,6 +114,46 @@ struct AdbDevice {
     device_type: String, // "adb" or "fastboot"
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct TodoItem {
+    content: String,
+    status: String, // "pending", "in_progress", "completed"
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct WorkState {
+    saved_at: String,
+    trigger: String, // "manual", "pre_compact", "auto"
+    task_summary: String,
+    working_files: Vec<String>,
+    notes: String,
+    todos: Vec<TodoItem>,
+}
+
+// ============================================================================
+// MCP Tool Parameters
+// ============================================================================
+
+/// Parameters for get_dev_context tool
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GetDevContextParams {
+    /// Detail level: 'minimal' (~200 tokens), 'normal' (~400 tokens), or 'full' (~1000 tokens). Default: 'normal'
+    level: Option<String>,
+}
+
+/// Parameters for save_work_state tool
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SaveWorkStateParams {
+    /// Brief summary of current task (required)
+    task_summary: String,
+    /// List of files currently being worked on (auto-detected from git diff if omitted)
+    working_files: Option<Vec<String>>,
+    /// Additional notes about current progress
+    notes: Option<String>,
+    /// Todo items as JSON array: [{"content": "...", "status": "pending|in_progress|completed"}]
+    todos: Option<String>,
+}
+
 #[derive(Debug, Default, Clone)]
 struct Context {
     project_name: String,
@@ -124,6 +165,7 @@ struct Context {
     command_history: Vec<HistoryEntry>,
     git_repos: Vec<GitInfo>,  // Multiple repositories support
     adb_devices: Vec<AdbDevice>,
+    work_state: Option<WorkState>,  // Saved work state for recovery
 }
 
 // ============================================================================
@@ -593,6 +635,77 @@ fn collect_adb_devices() -> Vec<AdbDevice> {
 }
 
 // ============================================================================
+// Work State Management
+// ============================================================================
+
+fn get_work_state_path() -> String {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    format!("{}/.contextkeeper/work-state.json", home)
+}
+
+fn ensure_contextkeeper_dir() -> io::Result<()> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let dir = format!("{}/.contextkeeper", home);
+    fs::create_dir_all(&dir)?;
+    Ok(())
+}
+
+fn save_work_state_to_file(state: &WorkState) -> io::Result<()> {
+    ensure_contextkeeper_dir()?;
+    let path = get_work_state_path();
+    let json = serde_json::to_string_pretty(state)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let mut file = fs::File::create(&path)?;
+    file.write_all(json.as_bytes())?;
+    Ok(())
+}
+
+fn load_work_state_from_file() -> Option<WorkState> {
+    let path = get_work_state_path();
+    if !Path::new(&path).exists() {
+        return None;
+    }
+
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+}
+
+/// Collect working files from git diff (for PreCompact hook)
+fn collect_working_files() -> Vec<String> {
+    let mut files = Vec::new();
+    let cwd = std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| ".".to_string());
+
+    // Try to get modified files from all git repos
+    if let Ok(output) = std::process::Command::new("bash")
+        .args(["-c", &format!(
+            "cd '{}' && find . -maxdepth 3 -name '.git' -type d 2>/dev/null | while read gitdir; do \
+             repo=$(dirname \"$gitdir\"); \
+             git -C \"$repo\" diff --name-only 2>/dev/null | sed \"s|^|$repo/|\" ; \
+             done | head -20",
+            cwd
+        )])
+        .output()
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                let line = line.trim();
+                if !line.is_empty() {
+                    // Clean up path (remove leading ./)
+                    let clean_path = line.trim_start_matches("./");
+                    files.push(clean_path.to_string());
+                }
+            }
+        }
+    }
+
+    files
+}
+
+// ============================================================================
 // Context Aggregator
 // ============================================================================
 
@@ -620,18 +733,174 @@ fn collect_context(config: &Config) -> Context {
     ctx.command_history = collect_command_history(config);
     ctx.git_repos = collect_git_repos(config);
     ctx.adb_devices = collect_adb_devices();
+    ctx.work_state = load_work_state_from_file();
     ctx
 }
 
 // ============================================================================
-// Output Formatter
+// Output Formatter (Hierarchical: minimal / normal / full)
 // ============================================================================
 
-fn format_context_markdown(ctx: &Context) -> String {
+/// Helper: format git status string
+fn format_git_status(git: &GitInfo) -> String {
+    if git.is_dirty {
+        if git.modified_files > 0 && git.untracked_files > 0 {
+            format!("{}M {}U", git.modified_files, git.untracked_files)
+        } else if git.modified_files > 0 {
+            format!("{}M", git.modified_files)
+        } else {
+            format!("{}U", git.untracked_files)
+        }
+    } else {
+        "clean".to_string()
+    }
+}
+
+/// Helper: format work state section
+fn format_work_state(work_state: &WorkState) -> String {
+    let mut out = String::new();
+    out.push_str("## Saved Work State\n");
+    out.push_str(&format!("- **Saved at:** {}\n", work_state.saved_at));
+
+    if !work_state.task_summary.is_empty() {
+        out.push_str(&format!("- **Task:** {}\n", work_state.task_summary));
+    }
+
+    if !work_state.working_files.is_empty() {
+        out.push_str("- **Working files:**\n");
+        for file in &work_state.working_files {
+            out.push_str(&format!("  - {}\n", file));
+        }
+    }
+
+    if !work_state.notes.is_empty() {
+        out.push_str(&format!("- **Notes:** {}\n", work_state.notes));
+    }
+
+    if !work_state.todos.is_empty() {
+        out.push_str("- **Todos:**\n");
+        for todo in &work_state.todos {
+            let checkbox = match todo.status.as_str() {
+                "completed" => "[x]",
+                "in_progress" => "[>]",
+                _ => "[ ]",
+            };
+            out.push_str(&format!("  - {} {}\n", checkbox, todo.content));
+        }
+    }
+
+    out.push('\n');
+    out
+}
+
+/// Minimal format (~200 tokens) - for recovery after compression
+fn format_minimal(ctx: &Context) -> String {
     let mut out = String::new();
 
-    out.push_str("# Development Context (ContextKeeper)\n\n");
+    out.push_str("# Context Recovery (Minimal)\n\n");
 
+    // Work state is most important for recovery
+    if let Some(ws) = &ctx.work_state {
+        if !ws.task_summary.is_empty() {
+            out.push_str(&format!("**Task:** {}\n", ws.task_summary));
+        }
+        if !ws.working_files.is_empty() {
+            let files: Vec<&str> = ws.working_files.iter().map(|s| s.as_str()).collect();
+            out.push_str(&format!("**Files:** {}\n", files.join(", ")));
+        }
+        if !ws.notes.is_empty() {
+            out.push_str(&format!("**Notes:** {}\n", ws.notes));
+        }
+        out.push('\n');
+    }
+
+    // Show only dirty repos
+    let dirty_repos: Vec<&GitInfo> = ctx.git_repos.iter().filter(|r| r.is_dirty).collect();
+    if !dirty_repos.is_empty() {
+        out.push_str("**Changed repos:** ");
+        let repo_strs: Vec<String> = dirty_repos
+            .iter()
+            .map(|r| format!("{} ({})", r.repo_path, format_git_status(r)))
+            .collect();
+        out.push_str(&repo_strs.join(", "));
+        out.push('\n');
+    }
+
+    // Device (one line)
+    if !ctx.adb_devices.is_empty() {
+        let device = &ctx.adb_devices[0];
+        out.push_str(&format!("**Device:** {} ({})\n", device.serial, device.device_type));
+    }
+
+    out.push_str("\n---\n");
+    out.push_str("*Run `get_dev_context` with level=\"normal\" or \"full\" for more details.*\n");
+
+    out
+}
+
+/// Normal format (~400 tokens) - balanced info
+fn format_normal(ctx: &Context) -> String {
+    let mut out = String::new();
+
+    out.push_str("# Development Context\n\n");
+
+    // Work state
+    if let Some(ws) = &ctx.work_state {
+        out.push_str(&format_work_state(ws));
+    }
+
+    // AI Hints
+    if !ctx.hints.is_empty() {
+        out.push_str("## AI Hints\n");
+        out.push_str(&format!("> {}\n\n", ctx.hints));
+    }
+
+    // Git Status (dirty repos only)
+    let dirty_repos: Vec<&GitInfo> = ctx.git_repos.iter().filter(|r| r.is_dirty).collect();
+    if !dirty_repos.is_empty() {
+        out.push_str("## Git Status (changes only)\n\n");
+        out.push_str("| Repository | Branch | Status |\n");
+        out.push_str("|------------|--------|--------|\n");
+        for git in dirty_repos {
+            out.push_str(&format!(
+                "| {} | {} | {} |\n",
+                git.repo_path, git.branch, format_git_status(git)
+            ));
+        }
+        out.push('\n');
+    }
+
+    // Active containers
+    if !ctx.containers.is_empty() {
+        out.push_str("## Active Containers\n");
+        for container in &ctx.containers {
+            out.push_str(&format!("- {} ({})\n", container.name, container.status));
+        }
+        out.push('\n');
+    }
+
+    // Connected devices
+    if !ctx.adb_devices.is_empty() {
+        out.push_str("## Connected Devices\n");
+        for device in &ctx.adb_devices {
+            out.push_str(&format!("- {} ({}, {})\n", device.serial, device.state, device.device_type));
+        }
+        out.push('\n');
+    }
+
+    out.push_str("---\n");
+    out.push_str("*Run `get_dev_context` with level=\"full\" for complete information.*\n");
+
+    out
+}
+
+/// Full format (~1000 tokens) - complete information
+fn format_full(ctx: &Context) -> String {
+    let mut out = String::new();
+
+    out.push_str("# Development Context (Full)\n\n");
+
+    // Project info
     if !ctx.project_name.is_empty() {
         out.push_str("## Project\n");
         out.push_str(&format!("- **Name:** {}\n", ctx.project_name));
@@ -641,11 +910,18 @@ fn format_context_markdown(ctx: &Context) -> String {
         out.push('\n');
     }
 
+    // Work state
+    if let Some(ws) = &ctx.work_state {
+        out.push_str(&format_work_state(ws));
+    }
+
+    // AI Hints
     if !ctx.hints.is_empty() {
         out.push_str("## AI Hints (Important)\n");
         out.push_str(&format!("> {}\n\n", ctx.hints));
     }
 
+    // Build targets
     if !ctx.targets.is_empty() {
         out.push_str("## Available Build Targets\n\n");
         out.push_str("| Target | Description | Container | Lunch Target |\n");
@@ -679,6 +955,7 @@ fn format_context_markdown(ctx: &Context) -> String {
         out.push('\n');
     }
 
+    // Containers
     if !ctx.containers.is_empty() {
         out.push_str("## Active Containers\n");
         for container in &ctx.containers {
@@ -690,6 +967,7 @@ fn format_context_markdown(ctx: &Context) -> String {
         out.push('\n');
     }
 
+    // Example commands
     if !ctx.available_commands.is_empty() {
         out.push_str("## Example Commands\n");
         out.push_str("```bash\n");
@@ -699,6 +977,7 @@ fn format_context_markdown(ctx: &Context) -> String {
         out.push_str("```\n");
     }
 
+    // Command history
     if !ctx.command_history.is_empty() {
         out.push_str("## Recent Relevant Commands\n");
         out.push_str(
@@ -708,7 +987,6 @@ fn format_context_markdown(ctx: &Context) -> String {
         out.push_str("|------|--------|\n");
         for entry in &ctx.command_history {
             let cmd_display = if entry.command.chars().count() > 80 {
-                // Safely truncate at character boundary
                 let truncated: String = entry.command.chars().take(77).collect();
                 format!("{}...", truncated)
             } else {
@@ -720,30 +998,17 @@ fn format_context_markdown(ctx: &Context) -> String {
         out.push('\n');
     }
 
-    // Git information (multiple repositories)
+    // Git information (ALL repositories)
     if !ctx.git_repos.is_empty() {
         out.push_str("## Git Status\n\n");
         out.push_str("| Repository | Branch | Status | Last Commit |\n");
         out.push_str("|------------|--------|--------|-------------|\n");
 
         for git in &ctx.git_repos {
-            let status = if git.is_dirty {
-                if git.modified_files > 0 && git.untracked_files > 0 {
-                    format!("{}M {}U", git.modified_files, git.untracked_files)
-                } else if git.modified_files > 0 {
-                    format!("{}M", git.modified_files)
-                } else {
-                    format!("{}U", git.untracked_files)
-                }
-            } else {
-                "clean".to_string()
-            };
-
             let commit = git.last_commit_short.replace('|', "\\|");
-
             out.push_str(&format!(
                 "| {} | {} | {} | {} |\n",
-                git.repo_path, git.branch, status, commit
+                git.repo_path, git.branch, format_git_status(git), commit
             ));
         }
         out.push('\n');
@@ -764,6 +1029,16 @@ fn format_context_markdown(ctx: &Context) -> String {
     }
 
     out
+}
+
+/// Main formatter dispatcher
+fn format_context_markdown(ctx: &Context, level: &str) -> String {
+    match level {
+        "minimal" => format_minimal(ctx),
+        "normal" => format_normal(ctx),
+        "full" => format_full(ctx),
+        _ => format_normal(ctx), // Default to normal
+    }
 }
 
 // ============================================================================
@@ -807,13 +1082,59 @@ impl ContextKeeperService {
         }
     }
 
-    #[tool(description = "Get current development environment context including build targets, containers, command history, and configuration. Call this when context is unclear or after context compression.")]
-    async fn get_dev_context(&self) -> Result<CallToolResult, McpError> {
+    #[tool(description = "Get development context. Use level='minimal' after compression (~200 tokens), 'normal' for balanced info (~400 tokens), or 'full' for complete details (~1000 tokens). Default is 'normal'.")]
+    async fn get_dev_context(
+        &self,
+        params: Parameters<GetDevContextParams>,
+    ) -> Result<CallToolResult, McpError> {
         let config = read_config();
         let context = collect_context(&config);
-        let markdown = format_context_markdown(&context);
+        let level_str = params.0.level.as_deref().unwrap_or("normal");
+        let markdown = format_context_markdown(&context, level_str);
 
         Ok(CallToolResult::success(vec![Content::text(markdown)]))
+    }
+
+    #[tool(description = "Save current work state for recovery after context compression. Call this before compression or at task milestones.")]
+    async fn save_work_state(
+        &self,
+        params: Parameters<SaveWorkStateParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let SaveWorkStateParams { task_summary, working_files, notes, todos } = params.0;
+
+        // Parse todos if provided
+        let todo_items: Vec<TodoItem> = todos
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default();
+
+        // Auto-collect working files if not provided
+        let files = working_files.unwrap_or_else(collect_working_files);
+
+        let state = WorkState {
+            saved_at: chrono::Utc::now().to_rfc3339(),
+            trigger: "manual".to_string(),
+            task_summary,
+            working_files: files,
+            notes: notes.unwrap_or_default(),
+            todos: todo_items,
+        };
+
+        match save_work_state_to_file(&state) {
+            Ok(_) => Ok(CallToolResult::success(vec![Content::text(format!(
+                "Work state saved successfully.\n\n\
+                - Task: {}\n\
+                - Files: {}\n\
+                - Todos: {} items\n\n\
+                This state will be included in `get_dev_context` output after compression.",
+                state.task_summary,
+                state.working_files.len(),
+                state.todos.len()
+            ))])),
+            Err(e) => Ok(CallToolResult::success(vec![Content::text(format!(
+                "Failed to save work state: {}",
+                e
+            ))])),
+        }
     }
 }
 
@@ -847,10 +1168,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
 
     // CLI mode: output context directly
+    // Usage: context-keeper --context [minimal|normal|full]
     if args.iter().any(|arg| arg == "--context" || arg == "-c") {
         let config = read_config();
         let context = collect_context(&config);
-        println!("{}", format_context_markdown(&context));
+
+        // Check for level argument
+        let level = args
+            .iter()
+            .position(|arg| arg == "--context" || arg == "-c")
+            .and_then(|i| args.get(i + 1))
+            .map(|s| s.as_str())
+            .unwrap_or("normal");
+
+        println!("{}", format_context_markdown(&context, level));
+        return Ok(());
+    }
+
+    // Save state mode (for PreCompact hook)
+    // Usage: context-keeper --save-state "task description"
+    if let Some(pos) = args.iter().position(|arg| arg == "--save-state") {
+        let task_summary = args.get(pos + 1).cloned().unwrap_or_default();
+        let files = collect_working_files();
+
+        let state = WorkState {
+            saved_at: chrono::Utc::now().to_rfc3339(),
+            trigger: "pre_compact".to_string(),
+            task_summary,
+            working_files: files,
+            notes: String::new(),
+            todos: Vec::new(),
+        };
+
+        match save_work_state_to_file(&state) {
+            Ok(_) => println!("Work state saved: {} files tracked", state.working_files.len()),
+            Err(e) => eprintln!("Failed to save work state: {}", e),
+        }
         return Ok(());
     }
 

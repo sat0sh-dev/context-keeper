@@ -38,6 +38,19 @@ Unlike static documentation, ContextKeeper collects **current state** at query t
 | **BuildScript** | Static | Parses config files to extract build targets |
 | **Container** | Dynamic | Detects running Podman/Docker containers |
 | **History** | Dynamic | Tracks relevant commands via Claude Code Hooks |
+| **Git** | Dynamic | Multi-repository status (branch, changes, last commit) |
+| **ADB/Fastboot** | Dynamic | Connected Android devices |
+| **WorkState** | Persistent | Saves/restores work state across compressions |
+
+### Context Compression Recovery
+
+ContextKeeper provides **hierarchical output levels** to minimize token usage after context compression:
+
+| Level | Tokens | Content |
+|-------|--------|---------|
+| `minimal` | ~200 | Task + working files + dirty repos only |
+| `normal` | ~400 | + containers + AI hints |
+| `full` | ~1000 | Complete information including all repos |
 
 ## Quick Start
 
@@ -244,17 +257,100 @@ max_entries = 20
 
 | Tool | Description |
 |------|-------------|
-| `get_dev_context` | Returns full development context as Markdown |
+| `get_dev_context(level)` | Returns development context. Level: `minimal`, `normal` (default), `full` |
+| `save_work_state(...)` | Save current work state for recovery after compression |
+
+### get_dev_context
+
+```
+get_dev_context()           # Normal level (default)
+get_dev_context("minimal")  # After compression (~200 tokens)
+get_dev_context("full")     # Complete information (~1000 tokens)
+```
+
+### save_work_state
+
+```
+save_work_state(
+  task_summary: "Implementing rate limiter",
+  working_files: ["auth_hook.cpp", "main.rs"],  # Optional, auto-detected if omitted
+  notes: "Token bucket implementation in progress",
+  todos: '[{"content": "Add tests", "status": "pending"}]'  # JSON string
+)
+```
 
 ## CLI Usage
 
 ```bash
 # Output context as Markdown (for testing)
-context-keeper --context
-context-keeper -c
+context-keeper --context          # Normal level
+context-keeper --context minimal  # Minimal level
+context-keeper --context full     # Full level
+
+# Save work state (for PreCompact hook)
+context-keeper --save-state "Current task description"
 
 # Run as MCP server (default, used by Claude Code)
 context-keeper
+```
+
+## Context Compression Recovery Setup
+
+To automatically save work state before context compression:
+
+### 1. Install hooks
+
+```bash
+mkdir -p ~/.contextkeeper/hooks
+cp hooks/pre-compact-save.sh ~/.contextkeeper/hooks/
+chmod +x ~/.contextkeeper/hooks/pre-compact-save.sh
+```
+
+### 2. Configure Claude Code hooks
+
+Add to `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreCompact": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/.contextkeeper/hooks/pre-compact-save.sh"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/path/to/context-keeper/hooks/log-commands.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+### 3. Recovery flow
+
+```
+Context compression imminent
+        ↓
+PreCompact hook → save work state (git diff files)
+        ↓
+Compression occurs
+        ↓
+Claude calls get_dev_context("minimal")
+        ↓
+Work state recovered (~200 tokens)
 ```
 
 ## How It Works
@@ -277,8 +373,12 @@ context-keeper
 - [x] Container Collector
 - [x] History Collector (via Claude Code Hooks)
 - [x] Official Rust MCP SDK (rmcp)
+- [x] Git branch/status collector (multi-repo support)
+- [x] ADB/Fastboot device detection
+- [x] Work state save/restore for compression recovery
+- [x] Hierarchical output levels (minimal/normal/full)
+- [x] PreCompact hook integration
 - [ ] `context-keeper init` wizard
-- [ ] Git branch/status collector
 - [ ] Guardrails (warn before dangerous commands)
 - [ ] ROS/ROS2 workspace detection
 - [ ] Yocto/BitBake support
