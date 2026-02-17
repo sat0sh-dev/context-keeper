@@ -4,7 +4,7 @@ version = "0.2.0"
 edition = "2021"
 description = "AI-Native Development Context Engine - Helps AI agents remember your build environment"
 license = "MIT"
-repository = "https://github.com/user/context-keeper"
+repository = "https://github.com/sat0sh-dev/context-keeper"
 keywords = ["ai", "mcp", "development", "context", "aosp", "ros"]
 categories = ["development-tools", "command-line-utilities"]
 

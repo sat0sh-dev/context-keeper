@@ -57,7 +57,7 @@ ContextKeeper provides **hierarchical output levels** to minimize token usage af
 ### 1. Build
 
 ```bash
-git clone https://github.com/user/context-keeper
+git clone https://github.com/sat0sh-dev/context-keeper
 cd context-keeper
 cargo build --release
 ```
