@@ -282,6 +282,9 @@ save_work_state(
 ## CLI Usage
 
 ```bash
+# Initialize a new project (interactive wizard)
+context-keeper init
+
 # Output context as Markdown (for testing)
 context-keeper --context          # Normal level
 context-keeper --context minimal  # Minimal level
@@ -293,6 +296,31 @@ context-keeper --save-state "Current task description"
 # Run as MCP server (default, used by Claude Code)
 context-keeper
 ```
+
+### Init Wizard
+
+The `init` command provides an interactive setup wizard:
+
+```
+$ context-keeper init
+
+🔧 ContextKeeper Setup Wizard
+
+Project name [my-project]:
+Project type (detected: aosp) [aosp]:
+Container runtime (detected: podman) [podman]:
+Build script entry point (optional): scripts/build.sh
+Config directory (optional): scripts/config
+AI hint for this project: Build commands must run inside container
+
+✅ Created contextkeeper.toml
+```
+
+**Auto-detection:**
+- **AOSP**: Detects `build/envsetup.sh`
+- **ROS/ROS2**: Detects `package.xml` or colcon workspace
+- **Yocto**: Detects `meta-*` directories or `poky/`
+- **Container runtime**: Checks for podman/docker availability
 
 ## Context Compression Recovery Setup
 
@@ -355,16 +383,21 @@ Work state recovered (~200 tokens)
 
 ## How It Works
 
-```
-┌─────────────────┐     MCP Protocol      ┌──────────────────┐
-│   Claude Code   │ ◄──────────────────► │  ContextKeeper   │
-│                 │                       │                  │
-│ "What container │  get_dev_context()   │ - Read config    │
-│  should I use?" │ ───────────────────► │ - Check podman   │
-│                 │                       │ - Parse history  │
-│                 │ ◄─────────────────── │ - Return context │
-│ "Use aosp-env"  │   Markdown response  │                  │
-└─────────────────┘                       └──────────────────┘
+```mermaid
+sequenceDiagram
+    participant CC as Claude Code
+    participant CK as ContextKeeper
+
+    CC->>CK: get_dev_context()
+
+    Note over CK: Read config
+    Note over CK: Check containers
+    Note over CK: Parse history
+    Note over CK: Collect git status
+
+    CK-->>CC: Markdown response
+
+    Note over CC: "Use aosp-env container"
 ```
 
 ## Roadmap
@@ -378,7 +411,7 @@ Work state recovered (~200 tokens)
 - [x] Work state save/restore for compression recovery
 - [x] Hierarchical output levels (minimal/normal/full)
 - [x] PreCompact hook integration
-- [ ] `context-keeper init` wizard
+- [x] `context-keeper init` wizard
 - [ ] Guardrails (warn before dangerous commands)
 - [ ] ROS/ROS2 workspace detection
 - [ ] Yocto/BitBake support
