@@ -99,7 +99,7 @@ struct HistoryEntry {
 
 #[derive(Debug, Default, Clone)]
 struct GitInfo {
-    repo_path: String,  // Relative path to the repository
+    repo_path: String, // Relative path to the repository
     branch: String,
     is_dirty: bool,
     modified_files: usize,
@@ -163,9 +163,9 @@ struct Context {
     available_commands: Vec<String>,
     hints: String,
     command_history: Vec<HistoryEntry>,
-    git_repos: Vec<GitInfo>,  // Multiple repositories support
+    git_repos: Vec<GitInfo>, // Multiple repositories support
     adb_devices: Vec<AdbDevice>,
-    work_state: Option<WorkState>,  // Saved work state for recovery
+    work_state: Option<WorkState>, // Saved work state for recovery
 }
 
 // ============================================================================
@@ -185,10 +185,7 @@ fn collect_build_targets(config: &Config) -> Vec<BuildTarget> {
         None => return targets,
     };
 
-    let pattern = scripts_config
-        .config_pattern
-        .as_deref()
-        .unwrap_or("*.conf");
+    let pattern = scripts_config.config_pattern.as_deref().unwrap_or("*.conf");
 
     let full_pattern = format!("{}/{}", config_dir, pattern);
 
@@ -334,10 +331,8 @@ fn collect_command_history(config: &Config) -> Vec<HistoryEntry> {
 
     let patterns = history_config.patterns.clone().unwrap_or(default_patterns);
 
-    let compiled_patterns: Vec<Regex> = patterns
-        .iter()
-        .filter_map(|p| Regex::new(p).ok())
-        .collect();
+    let compiled_patterns: Vec<Regex> =
+        patterns.iter().filter_map(|p| Regex::new(p).ok()).collect();
 
     let mut entries = Vec::new();
     let path = Path::new(&log_file);
@@ -349,7 +344,7 @@ fn collect_command_history(config: &Config) -> Vec<HistoryEntry> {
     if let Ok(file) = fs::File::open(path) {
         let reader = io::BufReader::new(file);
 
-        for line in reader.lines().flatten() {
+        for line in reader.lines().map_while(Result::ok) {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
                 let command = json["command"].as_str().unwrap_or("");
                 let matches_pattern = compiled_patterns.is_empty()
@@ -378,7 +373,7 @@ fn collect_command_history(config: &Config) -> Vec<HistoryEntry> {
 
 /// Collect git info from a single repository path
 fn collect_git_info_for_path(repo_path: &str) -> Option<GitInfo> {
-    let path = Path::new(repo_path);
+    let _path = Path::new(repo_path);
 
     // Check if this path is a git repository
     let is_git = std::process::Command::new("git")
@@ -446,7 +441,8 @@ fn collect_git_info_for_path(repo_path: &str) -> Option<GitInfo> {
         if output.status.success() {
             let commit_info = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if commit_info.len() > 50 {
-                info.last_commit_short = format!("{}...", &commit_info.chars().take(47).collect::<String>());
+                info.last_commit_short =
+                    format!("{}...", &commit_info.chars().take(47).collect::<String>());
             } else {
                 info.last_commit_short = commit_info;
             }
@@ -497,7 +493,11 @@ fn find_git_repos_recursive(
             if path.is_dir() {
                 let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 // Skip hidden directories and common non-repo directories
-                if name.starts_with('.') || name == "node_modules" || name == "target" || name == "out" {
+                if name.starts_with('.')
+                    || name == "node_modules"
+                    || name == "target"
+                    || name == "out"
+                {
                     continue;
                 }
                 find_git_repos_recursive(
@@ -653,8 +653,7 @@ fn ensure_contextkeeper_dir() -> io::Result<()> {
 fn save_work_state_to_file(state: &WorkState) -> io::Result<()> {
     ensure_contextkeeper_dir()?;
     let path = get_work_state_path();
-    let json = serde_json::to_string_pretty(state)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let json = serde_json::to_string_pretty(state).map_err(io::Error::other)?;
     let mut file = fs::File::create(&path)?;
     file.write_all(json.as_bytes())?;
     Ok(())
@@ -829,7 +828,10 @@ fn format_minimal(ctx: &Context) -> String {
     // Device (one line)
     if !ctx.adb_devices.is_empty() {
         let device = &ctx.adb_devices[0];
-        out.push_str(&format!("**Device:** {} ({})\n", device.serial, device.device_type));
+        out.push_str(&format!(
+            "**Device:** {} ({})\n",
+            device.serial, device.device_type
+        ));
     }
 
     out.push_str("\n---\n");
@@ -864,7 +866,9 @@ fn format_normal(ctx: &Context) -> String {
         for git in dirty_repos {
             out.push_str(&format!(
                 "| {} | {} | {} |\n",
-                git.repo_path, git.branch, format_git_status(git)
+                git.repo_path,
+                git.branch,
+                format_git_status(git)
             ));
         }
         out.push('\n');
@@ -883,7 +887,10 @@ fn format_normal(ctx: &Context) -> String {
     if !ctx.adb_devices.is_empty() {
         out.push_str("## Connected Devices\n");
         for device in &ctx.adb_devices {
-            out.push_str(&format!("- {} ({}, {})\n", device.serial, device.state, device.device_type));
+            out.push_str(&format!(
+                "- {} ({}, {})\n",
+                device.serial, device.state, device.device_type
+            ));
         }
         out.push('\n');
     }
@@ -942,7 +949,11 @@ fn format_full(ctx: &Context) -> String {
                 } else {
                     None
                 },
-                if target.can_flash { Some("flash") } else { None },
+                if target.can_flash {
+                    Some("flash")
+                } else {
+                    None
+                },
             ]
             .into_iter()
             .flatten()
@@ -1008,7 +1019,10 @@ fn format_full(ctx: &Context) -> String {
             let commit = git.last_commit_short.replace('|', "\\|");
             out.push_str(&format!(
                 "| {} | {} | {} | {} |\n",
-                git.repo_path, git.branch, format_git_status(git), commit
+                git.repo_path,
+                git.branch,
+                format_git_status(git),
+                commit
             ));
         }
         out.push('\n');
@@ -1074,6 +1088,12 @@ pub struct ContextKeeperService {
     tool_router: ToolRouter<Self>,
 }
 
+impl Default for ContextKeeperService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[tool_router]
 impl ContextKeeperService {
     pub fn new() -> Self {
@@ -1082,7 +1102,9 @@ impl ContextKeeperService {
         }
     }
 
-    #[tool(description = "Get development context. Use level='minimal' after compression (~200 tokens), 'normal' for balanced info (~400 tokens), or 'full' for complete details (~1000 tokens). Default is 'normal'.")]
+    #[tool(
+        description = "Get development context. Use level='minimal' after compression (~200 tokens), 'normal' for balanced info (~400 tokens), or 'full' for complete details (~1000 tokens). Default is 'normal'."
+    )]
     async fn get_dev_context(
         &self,
         params: Parameters<GetDevContextParams>,
@@ -1095,12 +1117,19 @@ impl ContextKeeperService {
         Ok(CallToolResult::success(vec![Content::text(markdown)]))
     }
 
-    #[tool(description = "Save current work state for recovery after context compression. Call this before compression or at task milestones.")]
+    #[tool(
+        description = "Save current work state for recovery after context compression. Call this before compression or at task milestones."
+    )]
     async fn save_work_state(
         &self,
         params: Parameters<SaveWorkStateParams>,
     ) -> Result<CallToolResult, McpError> {
-        let SaveWorkStateParams { task_summary, working_files, notes, todos } = params.0;
+        let SaveWorkStateParams {
+            task_summary,
+            working_files,
+            notes,
+            todos,
+        } = params.0;
 
         // Parse todos if provided
         let todo_items: Vec<TodoItem> = todos
@@ -1201,7 +1230,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         match save_work_state_to_file(&state) {
-            Ok(_) => println!("Work state saved: {} files tracked", state.working_files.len()),
+            Ok(_) => println!(
+                "Work state saved: {} files tracked",
+                state.working_files.len()
+            ),
             Err(e) => eprintln!("Failed to save work state: {}", e),
         }
         return Ok(());
