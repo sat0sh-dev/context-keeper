@@ -48,7 +48,7 @@ ContextKeeper provides **hierarchical output levels** to minimize token usage af
 
 | Level | Tokens | Content |
 |-------|--------|---------|
-| `minimal` | ~200 | Task + working files + dirty repos only |
+| `minimal` | ~200 | Hint + task + working files + dirty repos |
 | `normal` | ~400 | + containers + AI hints |
 | `full` | ~1000 | Complete information including all repos |
 
@@ -412,7 +412,7 @@ sequenceDiagram
 - [x] Hierarchical output levels (minimal/normal/full)
 - [x] PreCompact hook integration
 - [x] `context-keeper init` wizard
-- [ ] Guardrails (warn before dangerous commands)
+- [ ] Guardrails (pending - observing if hints are sufficient)
 - [ ] ROS/ROS2 workspace detection
 - [ ] Yocto/BitBake support
 

@@ -798,6 +798,11 @@ fn format_minimal(ctx: &Context) -> String {
 
     out.push_str("# Context Recovery (Minimal)\n\n");
 
+    // AI hints (critical for remembering build environment)
+    if !ctx.hints.is_empty() {
+        out.push_str(&format!("**Hint:** {}\n\n", ctx.hints));
+    }
+
     // Work state is most important for recovery
     if let Some(ws) = &ctx.work_state {
         if !ws.task_summary.is_empty() {
