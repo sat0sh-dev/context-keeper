@@ -54,7 +54,15 @@ ContextKeeper provides **hierarchical output levels** to minimize token usage af
 
 ## Quick Start
 
-### 1. Build
+### 1. Install
+
+**Option A: One-liner install (recommended)**
+
+```bash
+curl -sSL https://raw.githubusercontent.com/sat0sh-dev/context-keeper/main/scripts/install-binary.sh | bash
+```
+
+**Option B: Build from source**
 
 ```bash
 git clone https://github.com/sat0sh-dev/context-keeper
@@ -62,7 +70,14 @@ cd context-keeper
 cargo build --release
 ```
 
-### 2. Configure your project
+### 2. Initialize your project
+
+```bash
+cd /your/project
+context-keeper init
+```
+
+### 3. Configure your project (manual alternative)
 
 Create `contextkeeper.toml` in your project root:
 
@@ -92,14 +107,14 @@ patterns = [
 max_entries = 20
 ```
 
-### 3. Test locally
+### 4. Test locally
 
 ```bash
 cd /your/project
 /path/to/context-keeper --context
 ```
 
-### 4. Setup with Claude Code
+### 5. Setup with Claude Code
 
 **Option A: Run install script**
 
