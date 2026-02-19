@@ -41,6 +41,33 @@ HOOKS_CONFIG='{
             "command": "'"$SCRIPT_DIR"'/hooks/log-commands.sh"
           }
         ]
+      },
+      {
+        "matcher": "TodoWrite",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'"$SCRIPT_DIR"'/hooks/save-todos.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'"$SCRIPT_DIR"'/hooks/track-files.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'"$SCRIPT_DIR"'/hooks/track-files.sh"
+          }
+        ]
       }
     ]
   }

@@ -670,6 +670,85 @@ fn load_work_state_from_file() -> Option<WorkState> {
         .and_then(|content| serde_json::from_str(&content).ok())
 }
 
+/// Load saved todos from TodoWrite hook
+fn load_saved_todos() -> Vec<TodoItem> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let path = format!("{}/.contextkeeper/current-todos.json", home);
+
+    if !Path::new(&path).exists() {
+        return Vec::new();
+    }
+
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        .and_then(|json| {
+            json.get("todos").and_then(|t| t.as_array()).map(|arr| {
+                arr.iter()
+                    .filter_map(|item| {
+                        Some(TodoItem {
+                            content: item.get("content")?.as_str()?.to_string(),
+                            status: item.get("status")?.as_str()?.to_string(),
+                        })
+                    })
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
+}
+
+/// Load recently edited files from Edit/Write hook
+fn load_recent_files() -> Vec<String> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let path = format!("{}/.contextkeeper/recent-files.json", home);
+
+    if !Path::new(&path).exists() {
+        return Vec::new();
+    }
+
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        .and_then(|json| {
+            json.get("files").and_then(|f| f.as_array()).map(|arr| {
+                arr.iter()
+                    .filter_map(|item| item.get("path")?.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
+}
+
+/// Load or construct work state with hook-collected data
+fn load_work_state_with_hooks() -> Option<WorkState> {
+    // First try to load manually saved work state
+    let mut state = load_work_state_from_file().unwrap_or_default();
+
+    // Enhance with hook-collected data
+    let hook_todos = load_saved_todos();
+    let hook_files = load_recent_files();
+
+    // If we have hook data, update the state
+    if !hook_todos.is_empty() {
+        state.todos = hook_todos;
+    }
+
+    if !hook_files.is_empty() && state.working_files.is_empty() {
+        state.working_files = hook_files;
+    }
+
+    // Return None if state is completely empty
+    if state.task_summary.is_empty()
+        && state.todos.is_empty()
+        && state.working_files.is_empty()
+        && state.notes.is_empty()
+    {
+        return None;
+    }
+
+    Some(state)
+}
+
 /// Collect working files from git diff (for PreCompact hook)
 fn collect_working_files() -> Vec<String> {
     let mut files = Vec::new();
@@ -732,7 +811,7 @@ fn collect_context(config: &Config) -> Context {
     ctx.command_history = collect_command_history(config);
     ctx.git_repos = collect_git_repos(config);
     ctx.adb_devices = collect_adb_devices();
-    ctx.work_state = load_work_state_from_file();
+    ctx.work_state = load_work_state_with_hooks();
     ctx
 }
 

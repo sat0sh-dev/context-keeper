@@ -145,7 +145,7 @@ cd /your/project
 }
 ```
 
-2. (Optional) Enable command history logging in `~/.claude/settings.json`:
+2. (Optional) Enable hooks for command history and context recovery in `~/.claude/settings.json`:
 
 ```json
 {
@@ -154,16 +154,36 @@ cd /your/project
       {
         "matcher": "Bash",
         "hooks": [
-          {
-            "type": "command",
-            "command": "/path/to/context-keeper/hooks/log-commands.sh"
-          }
+          {"type": "command", "command": "/path/to/context-keeper/hooks/log-commands.sh"}
+        ]
+      },
+      {
+        "matcher": "TodoWrite",
+        "hooks": [
+          {"type": "command", "command": "/path/to/context-keeper/hooks/save-todos.sh"}
+        ]
+      },
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {"type": "command", "command": "/path/to/context-keeper/hooks/track-files.sh"}
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {"type": "command", "command": "/path/to/context-keeper/hooks/track-files.sh"}
         ]
       }
     ]
   }
 }
 ```
+
+**Hook descriptions:**
+- `log-commands.sh`: Captures relevant Bash commands (lunch targets, environment setup)
+- `save-todos.sh`: Saves current todos for automatic recovery after context compression
+- `track-files.sh`: Tracks recently edited files for context recovery
 
 3. Restart Claude Code and verify with `/mcp`
 
