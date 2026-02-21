@@ -2,6 +2,8 @@
 
 **AI-Native Development Context Engine** - Helps AI agents remember your build environment after context compression.
 
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/sat0sh)
+
 > **Note:** ContextKeeper is designed for **Claude Code**. It uses MCP (Model Context Protocol) and Claude Code Hooks for full functionality. Basic features (context output via CLI) work with other tools, but command history tracking and auto-recovery require Claude Code.
 
 ## Target Users
